@@ -2,10 +2,11 @@ pipeline {
     agent any
 
     environment {
+        // 배포 대상 EC2 정보
         EC2_USER = "ubuntu"
         EC2_HOST = "3.34.138.214"
 
-        // 중요: 배포 디렉토리가 없으면 에러가 나므로 홈 디렉토리 활용 권장
+        // 애플리케이션 설정
         APP_DIR  = "/home/ubuntu/app"
         APP_NAME = "jenkins_test-0.0.1-SNAPSHOT.jar"
         APP_PORT = "9090"
@@ -14,7 +15,7 @@ pipeline {
     stages {
         stage('Git Checkout') {
             steps {
-                // 내 레포지토리 주소 확인됨
+                // 내 깃허브 레포지토리에서 코드 가져오기
                 git url: 'https://github.com/ehrbs56/myapp.git', branch: 'main'
             }
         }
@@ -22,11 +23,14 @@ pipeline {
         stage('Build') {
             steps {
                 sh '''
-                # 1. Java 21 대신 Java 17을 사용하도록 강제 지정
-                export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-                export PATH=$JAVA_HOME/bin:$PATH
+                echo "Checking Java version..."
+                java -version
 
-                # 2. 권한 부여 및 빌드
+                # 만약 빌드 시 Java 17이 필요하다는 에러가 발생하면
+                # 아래 주석(#)을 제거하고 경로를 수정하여 사용하세요.
+                # export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+                # export PATH=$JAVA_HOME/bin:$PATH
+
                 chmod +x ./gradlew
                 ./gradlew clean bootJar -x test
                 '''
@@ -35,28 +39,30 @@ pipeline {
 
         stage('Deploy & Run on EC2') {
             steps {
-                // 3. /var/jenkins_home 경로 대신 안전한 sshagent 방식 사용
+                // 젠킨스에 등록한 'ec2-ssh' 인증 정보를 사용
                 sshagent(credentials: ['ec2-ssh']) {
                     sh """
-                    echo "Deploy start to ${EC2_HOST}"
+                    echo "Starting Deployment to ${EC2_HOST}..."
 
-                    # 폴더가 없을 경우를 대비해 생성
+                    # 1. 대상 서버에 애플리케이션 폴더 생성
                     ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "mkdir -p ${APP_DIR}"
 
-                    # 파일 전송 (sshagent 덕분에 -i 옵션 없이 전송 가능)
+                    # 2. 빌드된 jar 파일을 대상 서버로 전송
                     scp -o StrictHostKeyChecking=no build/libs/${APP_NAME} ${EC2_USER}@${EC2_HOST}:${APP_DIR}/${APP_NAME}
 
-                    # 원격 실행
+                    # 3. 대상 서버에서 기존 프로세스 종료 및 새 버전 실행
                     ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << EOF
-                        # 기존 프로세스 종료 (포트 기준)
+                        # 9090 포트를 사용하는 프로세스 종료
                         sudo fuser -k ${APP_PORT}/tcp || true
 
-                        echo "Starting new version..."
+                        echo "Launching ${APP_NAME} on port ${APP_PORT}..."
 
-                        # 백그라운드 실행
+                        # 백그라운드 실행 및 로그 기록
                         nohup java -jar ${APP_DIR}/${APP_NAME} \
                           --server.port=${APP_PORT} \
                           > ${APP_DIR}/app.log 2>&1 &
+
+                        echo "Application started successfully."
 EOF
                     """
                 }
@@ -66,10 +72,15 @@ EOF
 
     post {
         success {
-            echo "Deployment completed: http://${EC2_HOST}:${APP_PORT}"
+            echo "-----------------------------------------------------------"
+            echo " ✅ Deployment Completed!"
+            echo " URL: http://${EC2_HOST}:${APP_PORT}"
+            echo "-----------------------------------------------------------"
         }
         failure {
-            echo "Deployment failed"
+            echo "-----------------------------------------------------------"
+            echo " ❌ Deployment Failed. Please check the Console Output."
+            echo "-----------------------------------------------------------"
         }
     }
 }
